@@ -441,7 +441,8 @@ def recuperar_contexto_hibrido(
 ):
 
     # --------------------------------------------------------
-    # PRIMERA FUENTE: KNOWLEDGE BASE
+    # PRIMERA FUENTE:
+    # KNOWLEDGE BASE
     # --------------------------------------------------------
 
     resultados_rag, suficiente = (
@@ -595,8 +596,10 @@ INSTRUCCIONES:
     viajero.
 11. Mantén coherencia entre las actividades y la duración
     del viaje.
-12. Devuelve exclusivamente un objeto JSON válido.
-13. No incluyas Markdown, explicaciones ni bloques de código
+12. Si existe una instrucción específica dentro de las
+    restricciones, debes aplicarla al día correspondiente.
+13. Devuelve exclusivamente un objeto JSON válido.
+14. No incluyas Markdown, explicaciones ni bloques de código
     fuera del JSON.
 
 La estructura debe contener:
@@ -1071,8 +1074,11 @@ Información turística necesaria para planificar un viaje a
 Intereses principales:
 {", ".join(intereses)}
 
+Requisitos y restricciones:
+{", ".join(restricciones)}
+
 Busca información sobre lugares, actividades, experiencias
-y gastronomía relacionados con estos intereses.
+y gastronomía relacionados con estos intereses y requisitos.
 """
 
     contexto, fuente, informacion_suficiente = (
@@ -1150,20 +1156,6 @@ y gastronomía relacionados con estos intereses.
 # ============================================================
 # DETECCIÓN DE DATOS EXPLÍCITOS DEL USUARIO
 # ============================================================
-#
-# Esta función evita que Gemini complete por su cuenta datos
-# obligatorios que el usuario NO proporcionó explícitamente.
-#
-# No sustituye a Gemini.
-#
-# Solamente comprueba si la solicitud original contiene
-# indicios claros de:
-#
-# - duración
-# - presupuesto
-#
-# Esto hace más robusta la validación de información faltante.
-# ============================================================
 
 def detectar_datos_explicitos(
     consulta_usuario
@@ -1176,7 +1168,7 @@ def detectar_datos_explicitos(
     )
 
     # --------------------------------------------------------
-    # DETECTAR DURACIÓN
+    # DURACIÓN
     # --------------------------------------------------------
 
     patrones_duracion = [
@@ -1197,7 +1189,7 @@ def detectar_datos_explicitos(
     )
 
     # --------------------------------------------------------
-    # DETECTAR PRESUPUESTO
+    # PRESUPUESTO
     # --------------------------------------------------------
 
     patrones_presupuesto = [
@@ -1221,6 +1213,65 @@ def detectar_datos_explicitos(
         "duracion_explicita": duracion_explicita,
         "presupuesto_explicito": presupuesto_explicito
     }
+
+
+# ============================================================
+# EXTRACCIÓN ROBUSTA DE JSON
+# ============================================================
+
+def extraer_json_respuesta(
+    respuesta
+):
+
+    if not respuesta:
+        return None
+
+    texto = (
+        str(respuesta)
+        .strip()
+    )
+
+    # --------------------------------------------------------
+    # PRIMER INTENTO: JSON PURO
+    # --------------------------------------------------------
+
+    try:
+
+        return json.loads(
+            texto
+        )
+
+    except json.JSONDecodeError:
+        pass
+
+    # --------------------------------------------------------
+    # SEGUNDO INTENTO:
+    # BUSCAR OBJETO JSON DENTRO DE LA RESPUESTA
+    # --------------------------------------------------------
+
+    inicio = texto.find("{")
+    final = texto.rfind("}")
+
+    if (
+        inicio == -1
+        or final == -1
+        or final <= inicio
+    ):
+        return None
+
+    posible_json = texto[
+        inicio:final + 1
+    ]
+
+    try:
+
+        return json.loads(
+            posible_json
+        )
+
+    except json.JSONDecodeError:
+
+        return None
 
 
 # ============================================================
@@ -1280,13 +1331,11 @@ FORMATO:
         interaction.output_text
     )
 
-    try:
+    preferencias = extraer_json_respuesta(
+        respuesta
+    )
 
-        preferencias = json.loads(
-            respuesta
-        )
-
-    except json.JSONDecodeError:
+    if preferencias is None:
 
         return {
             "error": (
@@ -1298,11 +1347,9 @@ FORMATO:
 
     # --------------------------------------------------------
     # CORRECCIÓN DE SEGURIDAD
-    # --------------------------------------------------------
     #
     # Si el usuario NO escribió explícitamente una duración
-    # o presupuesto, forzamos el valor a None aunque Gemini
-    # haya intentado inferirlo.
+    # o presupuesto, se fuerza el valor a None.
     # --------------------------------------------------------
 
     datos_explicitos = detectar_datos_explicitos(
@@ -1318,6 +1365,89 @@ FORMATO:
         preferencias["presupuesto"] = None
 
     return preferencias
+
+
+# ============================================================
+# INTERPRETACIÓN DE MODIFICACIONES
+# ============================================================
+
+def interpretar_modificacion(
+    consulta_original,
+    modificacion
+):
+
+    prompt = f"""
+Eres el módulo de modificación de itinerarios de TravelGen AI.
+
+El usuario ya tiene un viaje planificado.
+
+SOLICITUD ORIGINAL:
+
+{consulta_original}
+
+MODIFICACIÓN SOLICITADA:
+
+{modificacion}
+
+Tu tarea es identificar únicamente qué aspectos del viaje
+deben modificarse.
+
+NO debes eliminar preferencias originales que el usuario
+no haya solicitado cambiar.
+
+Extrae:
+
+- nuevo_presupuesto
+- nuevos_intereses
+- nuevas_restricciones
+
+REGLAS:
+
+1. Si el presupuesto NO cambia, utiliza null.
+2. Si no se agregan intereses, utiliza [].
+3. Si no se agregan restricciones, utiliza [].
+4. No inventes información.
+5. Las restricciones pueden incluir instrucciones específicas
+   para un día concreto.
+6. Una solicitud como "el segundo día tenga senderismo"
+   debe conservarse como una restricción específica.
+7. Devuelve exclusivamente JSON válido.
+
+FORMATO:
+
+{{
+    "nuevo_presupuesto": null,
+    "nuevos_intereses": [],
+    "nuevas_restricciones": []
+}}
+"""
+
+    interaction = client.interactions.create(
+        model=MODELO_GEMINI,
+        input=prompt
+    )
+
+    respuesta = (
+        interaction.output_text
+    )
+
+    modificacion_interpretada = (
+        extraer_json_respuesta(
+            respuesta
+        )
+    )
+
+    if modificacion_interpretada is None:
+
+        return {
+            "error": (
+                "No fue posible interpretar "
+                "la modificación."
+            ),
+            "respuesta_original": respuesta
+        }
+
+    return modificacion_interpretada
 
 
 # ============================================================
@@ -1441,7 +1571,7 @@ def procesar_solicitud_usuario(
     )
 
     # --------------------------------------------------------
-    # 2. COMPROBAR ERROR DE INTERPRETACIÓN
+    # 2. COMPROBAR ERROR
     # --------------------------------------------------------
 
     if "error" in preferencias:
@@ -1491,7 +1621,10 @@ def procesar_solicitud_usuario(
             presupuesto=preferencias["presupuesto"],
             intereses=preferencias["intereses"],
             restricciones=preferencias["restricciones"],
-            tipo_viajero=preferencias["tipo_viajero"]
+            tipo_viajero=preferencias.get(
+                "tipo_viajero",
+                "viajero"
+            )
         )
     )
 
@@ -1524,6 +1657,295 @@ def procesar_solicitud_usuario(
         "informacion_suficiente": (
             resultado["informacion_suficiente"]
         )
+    }
+
+
+# ============================================================
+# MODIFICAR ITINERARIO
+# ============================================================
+
+def modificar_itinerario(
+    consulta_original,
+    modificacion
+):
+
+    # --------------------------------------------------------
+    # VALIDACIONES BÁSICAS
+    # --------------------------------------------------------
+
+    if (
+        not consulta_original
+        or not consulta_original.strip()
+    ):
+
+        return {
+            "tipo": "error",
+            "mensaje": (
+                "Primero debes generar un itinerario."
+            )
+        }
+
+    if (
+        not modificacion
+        or not modificacion.strip()
+    ):
+
+        return {
+            "tipo": "error",
+            "mensaje": (
+                "Escribe qué deseas modificar."
+            )
+        }
+
+    # --------------------------------------------------------
+    # 1. INTERPRETAR NUEVAMENTE LA SOLICITUD ORIGINAL
+    #
+    # Esto recupera las preferencias originales.
+    # --------------------------------------------------------
+
+    preferencias_originales = (
+        interpretar_solicitud_viaje(
+            consulta_original
+        )
+    )
+
+    if "error" in preferencias_originales:
+
+        return {
+            "tipo": "error",
+            "mensaje": (
+                "No fue posible recuperar "
+                "las preferencias del viaje original."
+            )
+        }
+
+    # --------------------------------------------------------
+    # 2. VALIDAR QUE LA SOLICITUD ORIGINAL ESTÉ COMPLETA
+    # --------------------------------------------------------
+
+    datos_validos, datos_faltantes = (
+        validar_preferencias_viaje(
+            preferencias_originales
+        )
+    )
+
+    if not datos_validos:
+
+        return {
+            "tipo": "error",
+            "mensaje": (
+                "La solicitud original no contiene "
+                "toda la información necesaria."
+            ),
+            "errores": [
+                f"Falta {dato}."
+                for dato in datos_faltantes
+            ]
+        }
+
+    # --------------------------------------------------------
+    # 3. INTERPRETAR ÚNICAMENTE LA MODIFICACIÓN
+    # --------------------------------------------------------
+
+    cambio = (
+        interpretar_modificacion(
+            consulta_original=consulta_original,
+            modificacion=modificacion
+        )
+    )
+
+    if "error" in cambio:
+
+        return {
+            "tipo": "error",
+            "mensaje": cambio["error"]
+        }
+
+    # --------------------------------------------------------
+    # 4. CONSERVAR PREFERENCIAS ORIGINALES
+    # --------------------------------------------------------
+
+    nuevas_preferencias = (
+        preferencias_originales.copy()
+    )
+
+    # --------------------------------------------------------
+    # 5. APLICAR NUEVO PRESUPUESTO
+    # --------------------------------------------------------
+
+    nuevo_presupuesto = (
+        cambio.get(
+            "nuevo_presupuesto"
+        )
+    )
+
+    if nuevo_presupuesto:
+
+        nuevas_preferencias["presupuesto"] = (
+            nuevo_presupuesto
+        )
+
+    # --------------------------------------------------------
+    # 6. CONSERVAR Y AMPLIAR INTERESES
+    # --------------------------------------------------------
+
+    intereses_originales = (
+        nuevas_preferencias.get(
+            "intereses",
+            []
+        )
+    )
+
+    nuevos_intereses = (
+        cambio.get(
+            "nuevos_intereses",
+            []
+        )
+    )
+
+    intereses_combinados = (
+        intereses_originales
+        + nuevos_intereses
+    )
+
+    # Eliminamos duplicados conservando el orden.
+
+    intereses_finales = []
+
+    for interes in intereses_combinados:
+
+        if interes not in intereses_finales:
+
+            intereses_finales.append(
+                interes
+            )
+
+    nuevas_preferencias["intereses"] = (
+        intereses_finales
+    )
+
+    # --------------------------------------------------------
+    # 7. CONSERVAR Y AMPLIAR RESTRICCIONES
+    # --------------------------------------------------------
+
+    restricciones_originales = (
+        nuevas_preferencias.get(
+            "restricciones",
+            []
+        )
+    )
+
+    nuevas_restricciones = (
+        cambio.get(
+            "nuevas_restricciones",
+            []
+        )
+    )
+
+    restricciones_combinadas = (
+        restricciones_originales
+        + nuevas_restricciones
+    )
+
+    restricciones_finales = []
+
+    for restriccion in restricciones_combinadas:
+
+        if restriccion not in restricciones_finales:
+
+            restricciones_finales.append(
+                restriccion
+            )
+
+    nuevas_preferencias["restricciones"] = (
+        restricciones_finales
+    )
+
+    # --------------------------------------------------------
+    # 8. AÑADIR LA MODIFICACIÓN ORIGINAL COMO REQUISITO
+    #
+    # Esto garantiza que una instrucción específica como:
+    #
+    # "el segundo día debe tener senderismo"
+    #
+    # no se pierda durante la generación.
+    # --------------------------------------------------------
+
+    instruccion_modificacion = (
+        f"MODIFICACIÓN SOLICITADA POR EL USUARIO: "
+        f"{modificacion.strip()}"
+    )
+
+    if instruccion_modificacion not in (
+        nuevas_preferencias["restricciones"]
+    ):
+
+        nuevas_preferencias["restricciones"].append(
+            instruccion_modificacion
+        )
+
+    # --------------------------------------------------------
+    # 9. GENERAR NUEVO ITINERARIO
+    #
+    # Se utiliza exactamente el mismo motor principal.
+    # Por tanto, se mantiene:
+    #
+    # Knowledge Base
+    #       ↓
+    # evaluación de suficiencia
+    #       ↓
+    # Web fallback si hace falta
+    #       ↓
+    # Gemini
+    #       ↓
+    # validaciones
+    # --------------------------------------------------------
+
+    resultado = (
+        generar_itinerario_v4(
+            destino=nuevas_preferencias["destino"],
+            duracion=nuevas_preferencias["duracion_dias"],
+            presupuesto=nuevas_preferencias["presupuesto"],
+            intereses=nuevas_preferencias["intereses"],
+            restricciones=nuevas_preferencias["restricciones"],
+            tipo_viajero=nuevas_preferencias.get(
+                "tipo_viajero",
+                "viajero"
+            )
+        )
+    )
+
+    # --------------------------------------------------------
+    # 10. COMPROBAR RESULTADO
+    # --------------------------------------------------------
+
+    if not resultado["exito"]:
+
+        return {
+            "tipo": "error",
+            "mensaje": (
+                "No fue posible generar un "
+                "itinerario válido después de aplicar "
+                "la modificación."
+            ),
+            "errores": resultado.get(
+                "errores",
+                []
+            )
+        }
+
+    # --------------------------------------------------------
+    # 11. DEVOLVER NUEVO ITINERARIO
+    # --------------------------------------------------------
+
+    return {
+        "tipo": "itinerario",
+        "itinerario": resultado["itinerario"],
+        "fuente": resultado["fuente"],
+        "informacion_suficiente": (
+            resultado["informacion_suficiente"]
+        ),
+        "preferencias": nuevas_preferencias
     }
 
 
@@ -1747,9 +2169,9 @@ st.write(
 modificacion = st.text_area(
     "¿Qué deseas cambiar?",
     placeholder=(
-        "Ejemplo: Quiero más actividades de senderismo, "
-        "menos gastronomía y que el segundo día incluya "
-        "más ciclismo."
+        "Ejemplo: Quiero que el segundo día tenga "
+        "alguna actividad de senderismo y que el "
+        "presupuesto no supere los 8 millones."
     ),
     height=120
 )
@@ -1773,39 +2195,32 @@ if st.button(
 
     else:
 
-        nueva_consulta = f"""
-Solicitud original del usuario:
-
-{consulta.strip()}
-
-El usuario desea modificar el itinerario anterior de la
-siguiente manera:
-
-{modificacion.strip()}
-
-Genera nuevamente el itinerario teniendo en cuenta la
-solicitud original y aplicando la modificación indicada.
-
-Mantén las demás preferencias del usuario que no hayan sido
-modificadas.
-"""
-
         with st.spinner(
             "Actualizando el itinerario..."
         ):
 
             resultado_actualizado = (
-                procesar_solicitud_usuario(
-                    nueva_consulta
+                modificar_itinerario(
+                    consulta_original=consulta.strip(),
+                    modificacion=modificacion.strip()
                 )
             )
 
         if resultado_actualizado["tipo"] == "itinerario":
 
+            st.success(
+                "Itinerario actualizado correctamente."
+            )
+
             st.markdown(
                 formatear_itinerario(
                     resultado_actualizado["itinerario"]
                 )
+            )
+
+            st.caption(
+                f"Fuente principal del contexto: "
+                f"{resultado_actualizado['fuente']}"
             )
 
         elif resultado_actualizado["tipo"] == "pregunta":
@@ -1819,6 +2234,18 @@ modificadas.
             st.error(
                 resultado_actualizado.get(
                     "mensaje",
-                    "No fue posible actualizar el itinerario."
+                    "No fue posible actualizar "
+                    "el itinerario."
                 )
             )
+
+            errores = resultado_actualizado.get(
+                "errores",
+                []
+            )
+
+            for error in errores:
+
+                st.write(
+                    f"- {error}"
+                )
