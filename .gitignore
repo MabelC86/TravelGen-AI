@@ -1,0 +1,18 @@
+# Secretos y credenciales
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Entornos Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Recursos locales de TravelGen AI
+chroma_db/
+knowledge_base/
+
+# Archivos temporales
+*.log
+.DS_Store
