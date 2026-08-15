@@ -116,11 +116,13 @@ def preparar_recursos():
         )
 
     if not RUTA_KNOWLEDGE_BASE.exists():
+
         raise FileNotFoundError(
             "No se encontró la Knowledge Base."
         )
 
     if not RUTA_CHROMA.exists():
+
         raise FileNotFoundError(
             "No se encontró ChromaDB."
         )
@@ -438,6 +440,10 @@ def recuperar_contexto_hibrido(
     numero_resultados=3
 ):
 
+    # --------------------------------------------------------
+    # PRIMERA FUENTE: KNOWLEDGE BASE
+    # --------------------------------------------------------
+
     resultados_rag, suficiente = (
         recuperar_informacion_v3(
             consulta=consulta,
@@ -446,6 +452,11 @@ def recuperar_contexto_hibrido(
         )
     )
 
+    # --------------------------------------------------------
+    # SI LA KNOWLEDGE BASE ES SUFICIENTE,
+    # NO SE REALIZA BÚSQUEDA WEB
+    # --------------------------------------------------------
+
     if suficiente:
 
         return (
@@ -453,6 +464,10 @@ def recuperar_contexto_hibrido(
             "base_conocimiento",
             True
         )
+
+    # --------------------------------------------------------
+    # FALLBACK WEB
+    # --------------------------------------------------------
 
     interaction = client.interactions.create(
         model=MODELO_GEMINI,
@@ -781,7 +796,7 @@ def validar_itinerario(
     if numeros_dias != numeros_esperados:
 
         errores.append(
-            f"La numeración de los días es incorrecta."
+            "La numeración de los días es incorrecta."
         )
 
     campos_actividad = [
@@ -1101,7 +1116,10 @@ y gastronomía relacionados con estos intereses.
                 "Gemini no devolvió un JSON válido."
             ),
             "respuesta_original": respuesta,
-            "fuente": fuente
+            "fuente": fuente,
+            "errores": [
+                "Gemini no devolvió un JSON válido."
+            ]
         }
 
     resultado_validacion, errores = (
@@ -1126,6 +1144,82 @@ y gastronomía relacionados con estos intereses.
             informacion_suficiente
         ),
         "errores": errores
+    }
+
+
+# ============================================================
+# DETECCIÓN DE DATOS EXPLÍCITOS DEL USUARIO
+# ============================================================
+#
+# Esta función evita que Gemini complete por su cuenta datos
+# obligatorios que el usuario NO proporcionó explícitamente.
+#
+# No sustituye a Gemini.
+#
+# Solamente comprueba si la solicitud original contiene
+# indicios claros de:
+#
+# - duración
+# - presupuesto
+#
+# Esto hace más robusta la validación de información faltante.
+# ============================================================
+
+def detectar_datos_explicitos(
+    consulta_usuario
+):
+
+    texto = (
+        str(consulta_usuario)
+        .lower()
+        .strip()
+    )
+
+    # --------------------------------------------------------
+    # DETECTAR DURACIÓN
+    # --------------------------------------------------------
+
+    patrones_duracion = [
+        r"\b\d+\s*d[ií]as?\b",
+        r"\b\d+\s*noches?\b",
+        r"\b\d+\s*semanas?\b",
+        r"\bun\s*d[ií]a\b",
+        r"\buna\s*semana\b",
+        r"\bfin\s*de\s*semana\b"
+    ]
+
+    duracion_explicita = any(
+        re.search(
+            patron,
+            texto
+        )
+        for patron in patrones_duracion
+    )
+
+    # --------------------------------------------------------
+    # DETECTAR PRESUPUESTO
+    # --------------------------------------------------------
+
+    patrones_presupuesto = [
+        r"\b\d+(?:[.,]\d+)?\s*(?:mill[oó]n|millones)\b",
+        r"\b\d+(?:[.,]\d+)?\s*(?:mil)\s*(?:pesos|cop)?\b",
+        r"\b\d[\d.,]*\s*(?:pesos|cop)\b",
+        r"\$\s*\d[\d.,]*",
+        r"\bpresupuesto\s+(?:de|es|aproximado|aproximada)\s+\d",
+        r"\b\d[\d.,]*\s*(?:mill[oó]n|millones)\s+de\s+pesos\b"
+    ]
+
+    presupuesto_explicito = any(
+        re.search(
+            patron,
+            texto
+        )
+        for patron in patrones_presupuesto
+    )
+
+    return {
+        "duracion_explicita": duracion_explicita,
+        "presupuesto_explicito": presupuesto_explicito
     }
 
 
@@ -1188,7 +1282,7 @@ FORMATO:
 
     try:
 
-        return json.loads(
+        preferencias = json.loads(
             respuesta
         )
 
@@ -1201,6 +1295,29 @@ FORMATO:
             ),
             "respuesta_original": respuesta
         }
+
+    # --------------------------------------------------------
+    # CORRECCIÓN DE SEGURIDAD
+    # --------------------------------------------------------
+    #
+    # Si el usuario NO escribió explícitamente una duración
+    # o presupuesto, forzamos el valor a None aunque Gemini
+    # haya intentado inferirlo.
+    # --------------------------------------------------------
+
+    datos_explicitos = detectar_datos_explicitos(
+        consulta_usuario
+    )
+
+    if not datos_explicitos["duracion_explicita"]:
+
+        preferencias["duracion_dias"] = None
+
+    if not datos_explicitos["presupuesto_explicito"]:
+
+        preferencias["presupuesto"] = None
+
+    return preferencias
 
 
 # ============================================================
@@ -1313,11 +1430,19 @@ def procesar_solicitud_usuario(
     consulta_usuario
 ):
 
+    # --------------------------------------------------------
+    # 1. INTERPRETAR SOLICITUD
+    # --------------------------------------------------------
+
     preferencias = (
         interpretar_solicitud_viaje(
             consulta_usuario
         )
     )
+
+    # --------------------------------------------------------
+    # 2. COMPROBAR ERROR DE INTERPRETACIÓN
+    # --------------------------------------------------------
 
     if "error" in preferencias:
 
@@ -1326,11 +1451,19 @@ def procesar_solicitud_usuario(
             "mensaje": preferencias["error"]
         }
 
+    # --------------------------------------------------------
+    # 3. VALIDAR INFORMACIÓN MÍNIMA
+    # --------------------------------------------------------
+
     datos_validos, datos_faltantes = (
         validar_preferencias_viaje(
             preferencias
         )
     )
+
+    # --------------------------------------------------------
+    # 4. SI FALTAN DATOS, PREGUNTAR
+    # --------------------------------------------------------
 
     if not datos_validos:
 
@@ -1347,6 +1480,10 @@ def procesar_solicitud_usuario(
             "preferencias": preferencias
         }
 
+    # --------------------------------------------------------
+    # 5. GENERAR ITINERARIO
+    # --------------------------------------------------------
+
     resultado = (
         generar_itinerario_v4(
             destino=preferencias["destino"],
@@ -1358,6 +1495,10 @@ def procesar_solicitud_usuario(
         )
     )
 
+    # --------------------------------------------------------
+    # 6. COMPROBAR VALIDACIÓN
+    # --------------------------------------------------------
+
     if not resultado["exito"]:
 
         return {
@@ -1366,8 +1507,15 @@ def procesar_solicitud_usuario(
                 "No fue posible generar un "
                 "itinerario válido."
             ),
-            "errores": resultado["errores"]
+            "errores": resultado.get(
+                "errores",
+                []
+            )
         }
+
+    # --------------------------------------------------------
+    # 7. DEVOLVER ITINERARIO
+    # --------------------------------------------------------
 
     return {
         "tipo": "itinerario",
